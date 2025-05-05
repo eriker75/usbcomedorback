@@ -4,9 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "cross-env PORT=7500 node dist/index.js",
+    "start": "node dist/index.js",
     "build": "tsc",
-    "dev": "cross-env PORT=7500 nodemon --watch src --ext ts,json --exec ts-node src/index.ts"
+    "dev": "nodemon --watch src --ext ts,json --exec ts-node src/index.ts"
   },
   "keywords": [],
   "author": "",
