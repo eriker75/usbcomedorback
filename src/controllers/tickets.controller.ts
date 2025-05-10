@@ -355,7 +355,7 @@ export const consumeTicket = async (
 
   try {
     const ticketsDisponibles = await Ticket.find({
-      userID: user?._id as string,
+      user: user?._id as string,
       status: TicketStatus.Disponible
     }).sort({ fechaEmision: 1 });
 
