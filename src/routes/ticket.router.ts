@@ -2,7 +2,8 @@ import { Router } from "express";
 import {
   getAllTickets,
   createTicket,
-  consumeTicket
+  consumeTicket,
+  getTicketStats
 } from "../controllers/tickets.controller";
 
 const router = Router();
@@ -13,5 +14,6 @@ router.post("/", createTicket);
 
 // Special actions
 router.post("/consume-ticket", consumeTicket);
+router.get("/stats", getTicketStats);
 
 export default router;

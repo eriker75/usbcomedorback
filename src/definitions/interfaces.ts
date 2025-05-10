@@ -1,6 +1,15 @@
+export interface JsonApiError {
+  errors: {
+    code: string;
+    status: string;
+    title: string;
+    detail: string;
+  }[];
+}
+
 export interface PaginatedResponse<T> {
   data?: T[];
-  errors?: [];
+  errors?: JsonApiError["errors"];
   meta: {
     total: number;
     limit: number;

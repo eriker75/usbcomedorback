@@ -2,11 +2,13 @@ import {
   Request as ExpressRequest,
   Response as ExpressResponse
 } from "express";
-import Ticket, { TicketStatus, ITicket } from "../models/ticket.model";
-import { PaginatedResponse } from "../definitions/interfaces";
+import Ticket, { ITicket, TicketStatus } from "../models/ticket.model";
+import { JsonApiError, PaginatedResponse } from "../definitions/interfaces";
 import User from "../models/user.model";
+import mongoose from "mongoose";
+import { ERROR_CODES } from "../definitions/constants";
 
-interface TicketRequestBody {
+interface TicketCreationBody {
   precioTicket: number;
   quantity: string;
   userId: string;
@@ -17,72 +19,185 @@ interface ConsumeTicketBody {
   ticketType?: string;
 }
 
+interface UserData {
+  _id: mongoose.Types.ObjectId;
+  name: string;
+  email: string;
+}
+
+interface TicketWithUser extends Omit<ITicket, "user"> {
+  _id: mongoose.Types.ObjectId;
+  precioTicket: number;
+  fechaEmision: Date;
+  fechaUso: Date | null;
+  status: TicketStatus;
+  user: UserData;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+interface TicketResponse {
+  _id: mongoose.Types.ObjectId;
+  precioTicket: number;
+  fechaEmision: Date;
+  fechaUso: Date | null;
+  status: TicketStatus;
+  user: {
+    name: string;
+    email: string;
+  };
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
 interface QueryParams {
-  page?: string;
   limit?: string;
+  page?: string;
   fechaInicio?: string;
   fechaFin?: string;
   userID?: string;
-  status?: TicketStatus;
-  userEmail?: string;
   userName?: string;
-}
-
-interface EnhancedTicket extends Omit<ITicket, "_id"> {
-  user: {
-    name?: string | null;
-    email?: string | null;
-  };
-}
-
-interface TicketFilters {
-  fechaUso?: {
-    $gte?: Date;
-    $lte?: Date;
-  };
-  _id?: string;
+  userEmail?: string;
   status?: TicketStatus;
-  userID?: string;
+}
+
+interface UserData {
+  _id: mongoose.Types.ObjectId;
+  name: string;
+  email: string;
+}
+
+interface TicketWithUser extends Omit<ITicket, "user"> {
+  user: UserData;
+}
+
+interface TicketResponse {
+  _id: mongoose.Types.ObjectId;
+  precioTicket: number;
+  fechaEmision: Date;
+  fechaUso: Date | null;
+  status: TicketStatus;
+  user: {
+    name: string;
+    email: string;
+  };
+}
+
+interface CreateTicketResponse {
+  message?: string;
+  tickets: TicketResponse | TicketResponse[];
 }
 
 export const createTicket = async (
-  req: ExpressRequest<{}, {}, TicketRequestBody>,
-  res: ExpressResponse
+  req: ExpressRequest<{}, {}, TicketCreationBody>,
+  res: ExpressResponse<CreateTicketResponse | JsonApiError>
 ): Promise<void> => {
   try {
-    console.log(req.body);
-    const quantity = parseInt(req.body.quantity) || 1;
+    const { quantity: quantityStr, userId, precioTicket } = req.body;
+    const quantity = parseInt(quantityStr) || 1;
 
-    const { quantity: _, ...ticketData } = req.body;
+    if (quantity > 5) {
+      res.status(400).json({
+        errors: [
+          {
+            code: ERROR_CODES.MAX_TICKETS_EXCEEDED,
+            status: "400",
+            title: "Límite de tickets excedido",
+            detail:
+              "No se pueden crear más de 5 tickets simultáneamente. Por favor, realice múltiples solicitudes si necesita más tickets."
+          }
+        ]
+      });
+      return;
+    }
 
-    console.log(ticketData);
+    const user = await User.findById(userId);
+    if (!user) {
+      res.status(404).json({
+        errors: [
+          {
+            code: ERROR_CODES.USER_NOT_FOUND,
+            status: "404",
+            title: "Usuario no encontrado",
+            detail: `No se encontró ningún usuario con el ID: ${userId}`
+          }
+        ]
+      });
+      return;
+    }
 
-    const ticketWithDate = {
-      precioTicket: ticketData.precioTicket,
-      userID: ticketData.userId,
+    const ticketBase = {
+      precioTicket,
+      user: new mongoose.Types.ObjectId(userId),
       fechaEmision: new Date(),
+      fechaUso: null,
       status: TicketStatus.Disponible
     };
 
-    console.log(ticketWithDate);
+    let savedTickets: TicketWithUser[];
 
     if (quantity > 1) {
-      const ticketsToCreate = Array(quantity).fill(ticketWithDate);
-      const savedTickets = await Ticket.insertMany(ticketsToCreate);
+      const ticketsToCreate = Array(quantity).fill(ticketBase);
+      const createdTickets = await Ticket.insertMany(ticketsToCreate);
+
+      savedTickets = await Ticket.find({
+        _id: { $in: createdTickets.map((ticket) => ticket._id) }
+      })
+        .populate<{ user: UserData }>({
+          path: "user",
+          select: "name email"
+        })
+        .lean<TicketWithUser[]>();
 
       res.status(201).json({
-        message: `Successfully created ${quantity} tickets`,
-        tickets: savedTickets
+        message: `Se crearon ${quantity} tickets exitosamente`,
+        tickets: savedTickets.map((ticket) => ({
+          _id: ticket._id,
+          precioTicket: ticket.precioTicket,
+          fechaEmision: ticket.fechaEmision,
+          fechaUso: ticket.fechaUso,
+          status: ticket.status,
+          user: {
+            name: ticket.user.name,
+            email: ticket.user.email
+          }
+        }))
       });
     } else {
-      const newTicket = new Ticket(ticketWithDate);
+      const newTicket = new Ticket(ticketBase);
       const savedTicket = await newTicket.save();
-      res.status(201).json(savedTicket);
+
+      // Populate y lean en un paso separado
+      const populatedTicket = await Ticket.findById(savedTicket._id)
+        .populate<{ user: UserData }>({
+          path: "user",
+          select: "name email"
+        })
+        .lean<TicketWithUser>();
+
+      if (!populatedTicket) {
+        throw new Error("Failed to create ticket");
+      }
+
+      res.status(201).json({
+        tickets: {
+          _id: populatedTicket._id,
+          precioTicket: populatedTicket.precioTicket,
+          fechaEmision: populatedTicket.fechaEmision,
+          fechaUso: populatedTicket.fechaUso,
+          status: populatedTicket.status,
+          user: {
+            name: populatedTicket.user.name,
+            email: populatedTicket.user.email
+          }
+        }
+      });
     }
   } catch (error) {
     console.error("Error creating ticket(s):", error);
     res.status(400).json({
-      message: error instanceof Error ? error.message : "Error creating ticket"
+      message: error instanceof Error ? error.message : "Error creating ticket",
+      tickets: []
     });
   }
 };
@@ -92,90 +207,131 @@ export const getAllTickets = async (
   res: ExpressResponse
 ): Promise<void> => {
   try {
-    console.log("ALL TICKETS", req.query);
-
-    // 1. Paginación
     const limit = parseInt(req.query.limit || "0");
     const page = req.query.page ? parseInt(req.query.page) - 1 : 0;
     const offset = page * limit;
 
-    // 2. Filtros
-    const filtros: TicketFilters = {};
+    const filtros: Record<string, any> = {};
 
-    // Manejo de fechas
     if (req.query.fechaInicio || req.query.fechaFin) {
-      filtros.fechaUso = {};
-      if (req.query.fechaInicio) {
-        filtros.fechaUso.$gte = new Date(req.query.fechaInicio);
+      const fechaInicioStr = req.query.fechaInicio as string;
+      const fechaFinStr = req.query.fechaFin as string;
+
+      if (fechaInicioStr && fechaFinStr) {
+        let fechaInicio = new Date(fechaInicioStr);
+        let fechaFin = new Date(fechaFinStr);
+
+        if (isNaN(fechaInicio.getTime()) || isNaN(fechaFin.getTime())) {
+          res.status(400).json({ message: "Fechas de inicio o fin inválidas" });
+        }
+
+        if (fechaInicio > fechaFin) {
+          res.status(400).json({
+            message:
+              "La fecha de inicio debe ser anterior o igual a la fecha de fin"
+          });
+        }
+
+        // Establecer la hora de inicio a las 00:00:00
+        fechaInicio.setHours(0, 0, 0, 0);
+
+        // Establecer la hora de fin a las 23:59:59
+        fechaFin.setHours(23, 59, 59, 999);
+
+        filtros.fechaEmision = {
+          $gte: fechaInicio,
+          $lte: fechaFin
+        };
+      } else if (fechaInicioStr) {
+        let fechaInicio = new Date(fechaInicioStr);
+        if (isNaN(fechaInicio.getTime())) {
+          res.status(400).json({ message: "Fecha de inicio inválida" });
+        }
+        fechaInicio.setHours(0, 0, 0, 0);
+        filtros.fechaEmision = { $gte: fechaInicio };
+      } else if (fechaFinStr) {
+        let fechaFin = new Date(fechaFinStr);
+        if (isNaN(fechaFin.getTime())) {
+          res.status(400).json({ message: "Fecha de fin inválida" });
+        }
+        fechaFin.setHours(23, 59, 59, 999);
+        filtros.fechaEmision = { $lte: fechaFin };
       }
-      if (req.query.fechaFin) {
-        filtros.fechaUso.$lte = new Date(req.query.fechaFin);
-      }
+    }
+
+    let userMatch: Record<string, any> = {};
+    if (req.query.userName) {
+      userMatch = {
+        ...userMatch,
+        name: new RegExp(req.query.userName, "i")
+      };
+    }
+    if (req.query.userEmail) {
+      userMatch = {
+        ...userMatch,
+        email: new RegExp(req.query.userEmail, "i")
+      };
     }
 
     if (req.query.userID) {
-      filtros.userID = req.query.userID;
+      filtros.user = new mongoose.Types.ObjectId(req.query.userID);
     }
 
-    if (req.query.status) {
-      console.log("status", req.query.status);
-      if (Object.values(TicketStatus).includes(req.query.status)) {
-        filtros.status = req.query.status;
-      }
+    if (
+      req.query.status &&
+      Object.values(TicketStatus).includes(req.query.status)
+    ) {
+      filtros.status = req.query.status;
     }
 
-    console.log({ filtros });
+    console.log("filtros", filtros);
 
-    // 3. Consulta
-    //const totalTickets = await Ticket.countDocuments(filtros);
-    const tickets = await Ticket.find(filtros);//.skip(offset).limit(limit);
+    const tickets = await Ticket.find(filtros)
+      .populate<{ user: UserData }>({
+        path: "user",
+        match: userMatch,
+        select: "name email"
+      })
+      .skip(offset)
+      .limit(limit)
+      .lean<TicketWithUser[]>();
 
-    // 4. Enriquecer tickets con información de usuario
-    const enhancedTickets = [];
+    const filteredTickets = tickets.filter(
+      (ticket): ticket is TicketWithUser =>
+        ticket.user !== null &&
+        typeof ticket.user === "object" &&
+        "name" in ticket.user &&
+        "email" in ticket.user
+    );
 
-    for await (const ticket of tickets) {
-      const user = await User.findById(ticket.userID);
-      enhancedTickets.push({
-        ...ticket.toJSON(),
+    const totalCount = await Ticket.countDocuments({
+      ...filtros,
+      user: { $in: filteredTickets.map((ticket) => ticket.user._id) }
+    });
+
+    const response: PaginatedResponse<TicketResponse> = {
+      data: filteredTickets.map((ticket) => ({
+        _id: ticket._id,
+        precioTicket: ticket.precioTicket,
+        fechaEmision: ticket.fechaEmision,
+        fechaUso: ticket.fechaUso,
+        status: ticket.status,
         user: {
-          name: user?.name || null,
-          email: user?.email || null
+          name: ticket.user.name,
+          email: ticket.user.email
         }
-      });
-    }
-
-    let filteredTickets = [...enhancedTickets];
-
-    if (req.query.userName) {
-      const searchName = req.query.userName.toLowerCase();
-      filteredTickets = filteredTickets.filter((ticket) =>
-        ticket.user.name?.toLowerCase().includes(searchName)
-      );
-    }
-
-    if (req.query.userEmail) {
-      const searchEmail = req.query.userEmail.toLowerCase();
-      filteredTickets = filteredTickets.filter((ticket) =>
-        ticket.user.email?.toLowerCase().includes(searchEmail)
-      );
-    }
-
-    // 6. Actualizar total y hasMore basado en los filtros
-    const filteredTotal = filteredTickets.length;
-    const hasMore = offset + limit < filteredTotal;
-
-    const response: PaginatedResponse<EnhancedTicket> = {
-      data: filteredTickets.slice(offset, offset + limit),
+      })),
       meta: {
-        total: filteredTotal,
+        total: totalCount,
         limit,
         offset,
-        hasMore
+        hasMore: offset + limit < totalCount
       }
     };
 
     res.status(200).json(response);
   } catch (error) {
+    console.error("Error in getAllTickets:", error);
     res.status(500).json({
       message:
         error instanceof Error ? error.message : "Error retrieving tickets"
@@ -187,7 +343,7 @@ export const consumeTicket = async (
   req: ExpressRequest<{}, {}, ConsumeTicketBody>,
   res: ExpressResponse
 ): Promise<void> => {
-  console.log("scanner body",req.body)
+  console.log("scanner body", req.body);
   const { email } = req.body;
 
   if (!email) {
@@ -195,7 +351,7 @@ export const consumeTicket = async (
     return;
   }
 
-  const user = await User.findOne({email})
+  const user = await User.findOne({ email });
 
   try {
     const ticketsDisponibles = await Ticket.find({
@@ -203,7 +359,7 @@ export const consumeTicket = async (
       status: TicketStatus.Disponible
     }).sort({ fechaEmision: 1 });
 
-    console.log(ticketsDisponibles)
+    console.log(ticketsDisponibles);
 
     if (ticketsDisponibles.length > 0) {
       const ticketMasAntiguo = ticketsDisponibles[0];
@@ -224,6 +380,138 @@ export const consumeTicket = async (
     console.error("Error al registrar la entrada al comedor:", error);
     res.status(500).json({
       message: "Error al procesar la entrada al comedor."
+    });
+  }
+};
+
+interface TicketStats {
+  totalTickets: number;
+  totalGanancias: number;
+  ticketsDisponibles: number;
+  ticketsUsados: number;
+}
+
+interface StatsQueryParams {
+  fechaInicio?: string;
+  fechaFin?: string;
+  userName?: string;
+  userEmail?: string;
+}
+
+export const getTicketStats = async (
+  req: ExpressRequest<{}, {}, {}, StatsQueryParams>,
+  res: ExpressResponse<TicketStats | any>
+): Promise<void> => {
+  try {
+    const matchStage: Record<string, any> = {};
+    const userMatch: Record<string, any> = {};
+
+    // Construir filtros de fecha
+    if (req.query.fechaInicio || req.query.fechaFin) {
+      matchStage.fechaEmision = {};
+
+      if (req.query.fechaInicio) {
+        const fechaInicio = new Date(req.query.fechaInicio);
+        fechaInicio.setHours(0, 0, 0, 0);
+        matchStage.fechaEmision.$gte = fechaInicio;
+      }
+
+      if (req.query.fechaFin) {
+        const fechaFin = new Date(req.query.fechaFin);
+        fechaFin.setHours(23, 59, 59, 999);
+        matchStage.fechaEmision.$lte = fechaFin;
+      }
+    }
+
+    // Construir filtros de usuario
+    if (req.query.userName) {
+      userMatch.name = new RegExp(req.query.userName, "i");
+    }
+    if (req.query.userEmail) {
+      userMatch.email = new RegExp(req.query.userEmail, "i");
+    }
+
+    const pipeline = [
+      // Primero hacemos el lookup para obtener la información del usuario
+      {
+        $lookup: {
+          from: "users",
+          localField: "user",
+          foreignField: "_id",
+          as: "userInfo"
+        }
+      },
+      // Desenrollamos el array de userInfo
+      { $unwind: "$userInfo" },
+      // Aplicamos los filtros de usuario si existen
+      ...(Object.keys(userMatch).length > 0
+        ? [
+            {
+              $match: {
+                $or: [
+                  { "userInfo.name": userMatch.name },
+                  { "userInfo.email": userMatch.email }
+                ]
+              }
+            }
+          ]
+        : []),
+      // Aplicamos los filtros de fecha
+      ...(Object.keys(matchStage).length > 0 ? [{ $match: matchStage }] : []),
+      // Agrupamos para obtener las estadísticas
+      {
+        $group: {
+          _id: null,
+          totalTickets: { $sum: 1 },
+          totalGanancias: {
+            $sum: {
+              $cond: [
+                { $eq: ["$status", TicketStatus.Usado] },
+                "$precioTicket",
+                0
+              ]
+            }
+          },
+          ticketsDisponibles: {
+            $sum: {
+              $cond: [{ $eq: ["$status", TicketStatus.Disponible] }, 1, 0]
+            }
+          },
+          ticketsUsados: {
+            $sum: {
+              $cond: [{ $eq: ["$status", TicketStatus.Usado] }, 1, 0]
+            }
+          }
+        }
+      },
+      // Proyectamos el resultado final
+      {
+        $project: {
+          _id: 0,
+          totalTickets: 1,
+          totalGanancias: 1,
+          ticketsDisponibles: 1,
+          ticketsUsados: 1
+        }
+      }
+    ];
+
+    const [stats] = await Ticket.aggregate(pipeline);
+
+    // Si no hay resultados, devolvemos valores por defecto
+    const response: TicketStats = stats || {
+      totalTickets: 0,
+      totalGanancias: 0,
+      ticketsDisponibles: 0,
+      ticketsUsados: 0
+    };
+
+    res.status(200).json(response);
+  } catch (error) {
+    console.error("Error getting ticket stats:", error);
+    res.status(500).json({
+      message:
+        error instanceof Error ? error.message : "Error getting ticket stats"
     });
   }
 };
