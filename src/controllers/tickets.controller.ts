@@ -8,7 +8,6 @@ import User from "../models/user.model";
 import mongoose from "mongoose";
 import { ERROR_CODES } from "../definitions/constants";
 
-
 interface TicketCreationBody {
   precioTicket: number;
   quantity: string;
@@ -214,6 +213,7 @@ export const getAllTickets = async (
 
     const filtros: Record<string, any> = {};
 
+    // Procesamiento de filtros de fecha
     if (req.query.fechaInicio || req.query.fechaFin) {
       const fechaInicioStr = req.query.fechaInicio as string;
       const fechaFinStr = req.query.fechaFin as string;
@@ -224,6 +224,7 @@ export const getAllTickets = async (
 
         if (isNaN(fechaInicio.getTime()) || isNaN(fechaFin.getTime())) {
           res.status(400).json({ message: "Fechas de inicio o fin inválidas" });
+          return;
         }
 
         if (fechaInicio > fechaFin) {
@@ -231,12 +232,10 @@ export const getAllTickets = async (
             message:
               "La fecha de inicio debe ser anterior o igual a la fecha de fin"
           });
+          return;
         }
 
-        // Establecer la hora de inicio a las 00:00:00
         fechaInicio.setHours(0, 0, 0, 0);
-
-        // Establecer la hora de fin a las 23:59:59
         fechaFin.setHours(23, 59, 59, 999);
 
         filtros.fechaEmision = {
@@ -247,6 +246,7 @@ export const getAllTickets = async (
         let fechaInicio = new Date(fechaInicioStr);
         if (isNaN(fechaInicio.getTime())) {
           res.status(400).json({ message: "Fecha de inicio inválida" });
+          return;
         }
         fechaInicio.setHours(0, 0, 0, 0);
         filtros.fechaEmision = { $gte: fechaInicio };
@@ -254,12 +254,14 @@ export const getAllTickets = async (
         let fechaFin = new Date(fechaFinStr);
         if (isNaN(fechaFin.getTime())) {
           res.status(400).json({ message: "Fecha de fin inválida" });
+          return;
         }
         fechaFin.setHours(23, 59, 59, 999);
         filtros.fechaEmision = { $lte: fechaFin };
       }
     }
 
+    // Filtros de usuario para populate
     let userMatch: Record<string, any> = {};
     if (req.query.userName) {
       userMatch = {
@@ -274,10 +276,12 @@ export const getAllTickets = async (
       };
     }
 
+    // Filtro por ID de usuario
     if (req.query.userID) {
       filtros.user = new mongoose.Types.ObjectId(req.query.userID);
     }
 
+    // Filtro por estado del ticket
     if (
       req.query.status &&
       Object.values(TicketStatus).includes(req.query.status)
@@ -287,17 +291,18 @@ export const getAllTickets = async (
 
     console.log("filtros", filtros);
 
-    const tickets = await Ticket.find(filtros)
+    // Obtener todos los tickets que coinciden con los filtros básicos
+    // pero sin paginación para calcular el total después de filtrar por usuario
+    const allTickets = await Ticket.find(filtros)
       .populate<{ user: UserData }>({
         path: "user",
         match: userMatch,
         select: "name email"
       })
-      .skip(offset)
-      .limit(limit)
       .lean<TicketWithUser[]>();
 
-    const filteredTickets = tickets.filter(
+    // Filtrar los tickets que no tienen usuario (porque no coinciden con userMatch)
+    const filteredAllTickets = allTickets.filter(
       (ticket): ticket is TicketWithUser =>
         ticket.user !== null &&
         typeof ticket.user === "object" &&
@@ -305,13 +310,15 @@ export const getAllTickets = async (
         "email" in ticket.user
     );
 
-    const totalCount = await Ticket.countDocuments({
-      ...filtros,
-      user: { $in: filteredTickets.map((ticket) => ticket.user._id) }
-    });
+    // El total correcto es el número de tickets después de filtrar por usuario
+    const totalCount = filteredAllTickets.length;
+
+    // Obtener los tickets para la página actual
+    // Aplicamos skip/limit en memoria ya que ya tenemos todos los tickets filtrados
+    const paginatedTickets = filteredAllTickets.slice(offset, offset + limit);
 
     const response: PaginatedResponse<TicketResponse> = {
-      data: filteredTickets.map((ticket) => ({
+      data: paginatedTickets.map((ticket) => ({
         _id: ticket._id,
         precioTicket: ticket.precioTicket,
         fechaEmision: ticket.fechaEmision,
