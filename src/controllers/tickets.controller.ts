@@ -8,6 +8,7 @@ import User from "../models/user.model";
 import mongoose from "mongoose";
 import { ERROR_CODES } from "../definitions/constants";
 
+
 interface TicketCreationBody {
   precioTicket: number;
   quantity: string;
